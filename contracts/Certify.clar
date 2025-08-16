@@ -82,6 +82,83 @@
 (define-data-var verification-log-counter uint u0)
 (define-constant VERIFICATION_EXPIRY_BLOCKS u1440)
 
+(define-map skills-registry
+    { skill-id: uint }
+    {
+        skill-name: (string-ascii 64),
+        category: (string-ascii 32),
+        description: (string-ascii 256),
+        creator: principal,
+        active: bool
+    }
+)
+
+(define-map certificate-skills
+    { certificate-id: uint, skill-id: uint }
+    {
+        proficiency-level: uint,
+        hours-completed: uint,
+        assessment-score: uint,
+        validated: bool,
+        validator: principal
+    }
+)
+
+(define-map student-skill-portfolio
+    { student-id: (string-ascii 64), skill-id: uint }
+    {
+        total-hours: uint,
+        highest-proficiency: uint,
+        best-score: uint,
+        certificate-count: uint,
+        last-updated: uint,
+        progression-path: (list 10 uint)
+    }
+)
+
+(define-map skill-requirements
+    { requirement-id: uint }
+    {
+        title: (string-ascii 128),
+        description: (string-ascii 256),
+        required-skills: (list 20 uint),
+        min-proficiency-levels: (list 20 uint),
+        creator: principal,
+        active: bool
+    }
+)
+
+(define-map skill-endorsements
+    { endorsement-id: uint }
+    {
+        student-id: (string-ascii 64),
+        skill-id: uint,
+        endorser: principal,
+        endorser-title: (string-ascii 64),
+        rating: uint,
+        comment: (string-ascii 256),
+        endorsed-at: uint
+    }
+)
+
+(define-map skill-pathways
+    { pathway-id: uint }
+    {
+        name: (string-ascii 128),
+        description: (string-ascii 256),
+        skill-sequence: (list 15 uint),
+        min-levels: (list 15 uint),
+        total-hours: uint,
+        creator: principal,
+        active: bool
+    }
+)
+
+(define-data-var skill-counter uint u0)
+(define-data-var requirement-counter uint u0)
+(define-data-var endorsement-counter uint u0)
+(define-data-var pathway-counter uint u0)
+
 (define-public (register-institution (name (string-ascii 64)))
     (let
         (
@@ -456,3 +533,246 @@
         })
     )
 )
+
+(define-public (register-skill (skill-name (string-ascii 64)) (category (string-ascii 32)) (description (string-ascii 256)))
+    (let
+        (
+            (caller tx-sender)
+            (skill-id (var-get skill-counter))
+            (new-skill-id (+ skill-id u1))
+            (institution (unwrap! (map-get? institutions {institution-principal: caller}) (err u404)))
+        )
+        (asserts! (get verified institution) (err u403))
+        (asserts! (get active institution) (err u403))
+        (asserts! (> (len skill-name) u0) (err u400))
+        (asserts! (> (len category) u0) (err u400))
+        (map-set skills-registry
+            {skill-id: skill-id}
+            {
+                skill-name: skill-name,
+                category: category,
+                description: description,
+                creator: caller,
+                active: true
+            }
+        )
+        (var-set skill-counter new-skill-id)
+        (ok skill-id)
+    )
+)
+
+(define-public (assign-certificate-skills (certificate-id uint) (skill-ids (list 10 uint)) (proficiency-levels (list 10 uint)) (hours-completed (list 10 uint)) (assessment-scores (list 10 uint)))
+    (let
+        (
+            (caller tx-sender)
+            (certificate (unwrap! (map-get? certificates {certificate-id: certificate-id}) (err u404)))
+            (institution (unwrap! (map-get? institutions {institution-principal: caller}) (err u404)))
+        )
+        (asserts! (get verified institution) (err u403))
+        (asserts! (get active institution) (err u403))
+        (asserts! (is-eq (get issuer certificate) caller) (err u403))
+        (asserts! (not (get revoked certificate)) (err u402))
+        (asserts! (is-eq (len skill-ids) (len proficiency-levels)) (err u400))
+        (asserts! (is-eq (len skill-ids) (len hours-completed)) (err u400))
+        (asserts! (is-eq (len skill-ids) (len assessment-scores)) (err u400))
+        (unwrap-panic (process-skill-assignments certificate-id skill-ids proficiency-levels hours-completed assessment-scores caller u0))
+        (unwrap-panic (update-student-portfolio (get student-id certificate) skill-ids proficiency-levels hours-completed assessment-scores))
+        (ok true)
+    )
+)
+
+(define-public (create-skill-requirement (title (string-ascii 128)) (description (string-ascii 256)) (required-skills (list 20 uint)) (min-proficiency-levels (list 20 uint)))
+    (let
+        (
+            (caller tx-sender)
+            (requirement-id (var-get requirement-counter))
+            (new-requirement-id (+ requirement-id u1))
+            (institution (unwrap! (map-get? institutions {institution-principal: caller}) (err u404)))
+        )
+        (asserts! (get verified institution) (err u403))
+        (asserts! (get active institution) (err u403))
+        (asserts! (> (len title) u0) (err u400))
+        (asserts! (is-eq (len required-skills) (len min-proficiency-levels)) (err u400))
+        (asserts! (<= (len required-skills) u20) (err u400))
+        (map-set skill-requirements
+            {requirement-id: requirement-id}
+            {
+                title: title,
+                description: description,
+                required-skills: required-skills,
+                min-proficiency-levels: min-proficiency-levels,
+                creator: caller,
+                active: true
+            }
+        )
+        (var-set requirement-counter new-requirement-id)
+        (ok requirement-id)
+    )
+)
+
+(define-public (endorse-student-skill (student-id (string-ascii 64)) (skill-id uint) (endorser-title (string-ascii 64)) (rating uint) (comment (string-ascii 256)))
+    (let
+        (
+            (caller tx-sender)
+            (endorsement-id (var-get endorsement-counter))
+            (new-endorsement-id (+ endorsement-id u1))
+            (skill (unwrap! (map-get? skills-registry {skill-id: skill-id}) (err u404)))
+            (institution (unwrap! (map-get? institutions {institution-principal: caller}) (err u404)))
+        )
+        (asserts! (get verified institution) (err u403))
+        (asserts! (get active institution) (err u403))
+        (asserts! (get active skill) (err u402))
+        (asserts! (> (len student-id) u0) (err u400))
+        (asserts! (> rating u0) (err u400))
+        (asserts! (<= rating u10) (err u400))
+        (map-set skill-endorsements
+            {endorsement-id: endorsement-id}
+            {
+                student-id: student-id,
+                skill-id: skill-id,
+                endorser: caller,
+                endorser-title: endorser-title,
+                rating: rating,
+                comment: comment,
+                endorsed-at: stacks-block-height
+            }
+        )
+        (var-set endorsement-counter new-endorsement-id)
+        (ok endorsement-id)
+    )
+)
+
+(define-public (create-skill-pathway (name (string-ascii 128)) (description (string-ascii 256)) (skill-sequence (list 15 uint)) (min-levels (list 15 uint)) (total-hours uint))
+    (let
+        (
+            (caller tx-sender)
+            (pathway-id (var-get pathway-counter))
+            (new-pathway-id (+ pathway-id u1))
+            (institution (unwrap! (map-get? institutions {institution-principal: caller}) (err u404)))
+        )
+        (asserts! (get verified institution) (err u403))
+        (asserts! (get active institution) (err u403))
+        (asserts! (> (len name) u0) (err u400))
+        (asserts! (is-eq (len skill-sequence) (len min-levels)) (err u400))
+        (asserts! (<= (len skill-sequence) u15) (err u400))
+        (asserts! (> total-hours u0) (err u400))
+        (map-set skill-pathways
+            {pathway-id: pathway-id}
+            {
+                name: name,
+                description: description,
+                skill-sequence: skill-sequence,
+                min-levels: min-levels,
+                total-hours: total-hours,
+                creator: caller,
+                active: true
+            }
+        )
+        (var-set pathway-counter new-pathway-id)
+        (ok pathway-id)
+    )
+)
+
+(define-public (check-skill-requirement-match (student-id (string-ascii 64)) (requirement-id uint))
+    (let
+        (
+            (requirement (unwrap! (map-get? skill-requirements {requirement-id: requirement-id}) (err u404)))
+            (required-skills (get required-skills requirement))
+            (min-levels (get min-proficiency-levels requirement))
+        )
+        (asserts! (get active requirement) (err u402))
+        (ok (check-skills-match student-id required-skills min-levels u0))
+    )
+)
+
+(define-private (process-skill-assignments (certificate-id uint) (skill-ids (list 10 uint)) (proficiency-levels (list 10 uint)) (hours-completed (list 10 uint)) (assessment-scores (list 10 uint)) (validator principal) (index uint))
+    (let
+        (
+            (current-skill-id (unwrap! (element-at? skill-ids index) (ok true)))
+            (current-proficiency (unwrap! (element-at? proficiency-levels index) (err u400)))
+            (current-hours (unwrap! (element-at? hours-completed index) (err u400)))
+            (current-score (unwrap! (element-at? assessment-scores index) (err u400)))
+        )
+        (if (< index (len skill-ids))
+            (begin
+                (map-set certificate-skills
+                    {certificate-id: certificate-id, skill-id: current-skill-id}
+                    {
+                        proficiency-level: current-proficiency,
+                        hours-completed: current-hours,
+                        assessment-score: current-score,
+                        validated: true,
+                        validator: validator
+                    }
+                )
+                (ok true)
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-private (update-student-portfolio (student-id (string-ascii 64)) (skill-ids (list 10 uint)) (proficiency-levels (list 10 uint)) (hours-completed (list 10 uint)) (assessment-scores (list 10 uint)))
+    (begin
+        (ok true)
+    )
+)
+
+
+
+(define-private (check-skills-match (student-id (string-ascii 64)) (required-skills (list 20 uint)) (min-levels (list 20 uint)) (index uint))
+    (let
+        (
+            (current-skill (unwrap! (element-at? required-skills index) true))
+            (min-level (unwrap! (element-at? min-levels index) true))
+            (student-portfolio (map-get? student-skill-portfolio {student-id: student-id, skill-id: current-skill}))
+        )
+        (if (< index (len required-skills))
+            (match student-portfolio
+                portfolio-data 
+                    (>= (get highest-proficiency portfolio-data) min-level)
+                false
+            )
+            true
+        )
+    )
+)
+
+(define-read-only (get-skill-info (skill-id uint))
+    (ok (map-get? skills-registry {skill-id: skill-id}))
+)
+
+(define-read-only (get-certificate-skills (certificate-id uint))
+    (ok (map-get? certificate-skills {certificate-id: certificate-id, skill-id: u0}))
+)
+
+(define-read-only (get-student-skill-portfolio (student-id (string-ascii 64)) (skill-id uint))
+    (ok (map-get? student-skill-portfolio {student-id: student-id, skill-id: skill-id}))
+)
+
+(define-read-only (get-skill-requirement (requirement-id uint))
+    (ok (map-get? skill-requirements {requirement-id: requirement-id}))
+)
+
+(define-read-only (get-skill-endorsement (endorsement-id uint))
+    (ok (map-get? skill-endorsements {endorsement-id: endorsement-id}))
+)
+
+(define-read-only (get-skill-pathway (pathway-id uint))
+    (ok (map-get? skill-pathways {pathway-id: pathway-id}))
+)
+
+(define-read-only (get-student-skill-summary (student-id (string-ascii 64)))
+    (let
+        (
+            (total-skills (var-get skill-counter))
+        )
+        (ok {
+            total-skills-acquired: u0,
+            total-skills-available: total-skills,
+            skill-completion-rate: u0
+        })
+    )
+)
+
+
